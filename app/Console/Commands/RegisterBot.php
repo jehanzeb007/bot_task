@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use GuzzleHttp\Client;
+use GuzzleHttp\Cookie\CookieJar;
 use Symfony\Component\DomCrawler\Crawler;
 use Google\Cloud\TextToSpeech\V1\TextToSpeechClient;
 use Google\Cloud\Speech\V1\SpeechClient;
@@ -17,57 +18,87 @@ class RegisterBot extends Command
 
     public function __construct()
     {
+
         parent::__construct();
     }
 
     public function handle()
     {
-        $client = new Client(['cookies' => true]);
+        $cookieJar = new CookieJar();
+        $client = new Client(['cookies' => $cookieJar]);
 
         // Step 1: Access the registration page
-        $response = $client->get('https://challenge.blackscale.media/register.php');
-        $html = $response->getBody()->getContents();
-        $crawler = new Crawler($html);
+        $url = 'https://challenge.blackscale.media/register.php';
+        try {
+            $response = $client->get($url);
+            $html = $response->getBody()->getContents();
+            $crawler = new Crawler($html, $url);
 
-        // Step 2: Fill the form fields
-        $form = $crawler->filter('form')->form();
-        $formData = [
-            'username' => 'testuser',
-            'email' => 'testuser@example.com',
-            'password' => 'password123',
-            'confirm_password' => 'password123',
-        ];
+            // Step 2: Extract the form and hidden fields
+            $form = $crawler->filter('form')->form();
+            $stoken = $crawler->filter('input[name="stoken"]')->attr('value');
 
-        // Step 3: Solve reCAPTCHA using TTS and STT
-        $recaptchaSolution = $this->solveRecaptcha($crawler);
+            // Step 3: Fill the form fields, including the hidden stoken
+            $formData = [
+                'fullname' => 'Test User',
+                'email' => 'testuser@example.com',
+                'password' => 'password123',
+                'stoken' => $stoken,
+            ];
+            $cookieJar = CookieJar::fromArray([
+                'ctoken' => '6acef1a66c',
+                'PHPSESSID' => 'b220176ae27ae66804b0f73d547a3a99'
+            ], parse_url($url, PHP_URL_HOST));
+            // Step 4: Submit the form using a POST request
+            $actionUrl = $form->getUri(); // Get the form action URL
+            print_r($formData);
+            $response = $client->post($actionUrl, [
+                'form_params' => $formData,
+                'cookies' => $cookieJar, // Include the cookie jar for session management
+            ]);
 
-        if (!$recaptchaSolution) {
-            $this->error('Failed to solve reCAPTCHA');
-            return;
-        }
+            $html = $response->getBody()->getContents();
+            $crawler = new Crawler($html, $url);
+            // Handle the response, e.g., check for success message
+            if ($crawler->filter('.verification-box')->count()) {
+                // Step 5: Extract email verification code
+                $email_code = $this->getEmailContent();
+                $this->postEmailCode($crawler, $client, $email_code);
+                $this->info('Registration Email successful!');
 
-        $formData['g-recaptcha-response'] = $recaptchaSolution;
 
-        // Step 4: Submit the form
-        $response = $client->submit($form, $formData);
-        $html = $response->getBody()->getContents();
-        $crawler = new Crawler($html);
-
-        // Handle the response, e.g., check for success message
-        if ($crawler->filter('.success-message')->count()) {
-            $this->info('Registration successful!');
-
-            // Step 5: Extract email verification code
-            // Mock email reading process (you need a real email handler)
-            $emailContent = $this->getEmailContent();
-            $verificationCode = $this->extractVerificationCode($emailContent);
-
-            $this->info('Verification code: ' . $verificationCode);
-        } else {
-            $this->error('Registration failed!');
+                //Artisan::call('emails:read');
+            } else {
+                $this->error('Registration failed!');
+            }
+        } catch (RequestException $e) {
+            $this->error('Request failed: ' . $e->getMessage());
         }
     }
+    private function postEmailCode($crawler, $client, $email_code){
 
+        try {
+            $form = $crawler->filter('form')->form();
+            $formData = [
+                'code' => $email_code,
+            ];
+            $actionUrl = $form->getUri(); // Get the form action URL
+            $response = $client->post($actionUrl, [
+                'form_params' => $formData,
+            ]);
+
+            $html = $response->getBody()->getContents();
+            $crawler = new Crawler($html);
+            if ($crawler->filter('.g-recaptcha')->count()) {
+                $this->solveRecaptcha($crawler);
+                $this->info('Captcha done!');
+            } else {
+                $this->error('Registration failed!');
+            }
+        } catch (RequestException $e) {
+            $this->error('Request failed: ' . $e->getMessage());
+        }
+    }
     private function solveRecaptcha($crawler)
     {
         // Find the audio captcha URL
@@ -101,7 +132,8 @@ class RegisterBot extends Command
     {
         // Implement the logic to fetch the email content
         // This could be through an IMAP/POP3 client or an email API
-        return 'Your verification code is 123456';
+        //'Your verification code is: 352b20';
+        return '123456';
     }
 
     private function extractVerificationCode($emailContent)
